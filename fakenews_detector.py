@@ -1,28 +1,20 @@
 """
 PIVAS — Political Information Verification Assisted System
 ============================================================
-The tangible artifact of the MIT 799 postgraduate project at Lagos State
+Tangible artifact of the MIT 799 postgraduate project at Lagos State
 University titled: "Deepfakes and the Spread of Political Misinformation:
 Developing a Framework for Information Verification among Nigerian Social
 Media Users."
 
 PIVAS operationalises the Nigerian Information Verification Framework (NIVF)
-described in Chapter 3 and Chapter 4 of the thesis. It lets ordinary
-Nigerian social-media users paste a suspicious political claim, headline or
-URL and receive a lightweight verification verdict grounded in coverage by
-Nigerian fact-checking organisations and credible mainstream media.
+described in Chapter 3 and Chapter 4 of the thesis. Users paste a suspicious
+political claim, headline, or URL and receive a lightweight, colour-coded
+verdict grounded in coverage by Nigerian fact-checkers and credible
+mainstream media.
 
-Design notes:
-- Uses DuckDuckGo (via the `duckduckgo-search` library) for keyless search,
-  so the app can be hosted on Streamlit Community Cloud without needing any
-  API secret.
-- Optional per-platform filters restrict the query to a specific social
-  media domain via a `site:` filter. WhatsApp is included in the UI but is
-  end-to-end encrypted, so its filter falls back to whatsapp.com public
-  channels only.
-- The verdict logic prioritises Nigerian trusted sources first, then
-  regional and international outlets, in line with the localisation
-  argument in Chapter 5 §5.4.
+Search backends (both keyless, no API secret required):
+1. Primary — ddgs (the new name of the duckduckgo-search library).
+2. Fallback — Wikipedia OpenSearch API, always reachable, always keyless.
 """
 
 from __future__ import annotations
@@ -33,11 +25,17 @@ from urllib.parse import urlparse
 import requests
 import streamlit as st
 
-# duckduckgo-search may not be installed at first run; degrade gracefully.
+# `ddgs` is the current package name; the previous `duckduckgo-search`
+# releases now emit runtime errors on some networks. Import both and prefer
+# ddgs if it is installed.
+DDGS = None
 try:
-    from duckduckgo_search import DDGS
-except Exception:  # pragma: no cover - handled at runtime
-    DDGS = None
+    from ddgs import DDGS  # noqa: F401
+except Exception:
+    try:
+        from duckduckgo_search import DDGS  # noqa: F401
+    except Exception:
+        DDGS = None
 
 
 # ----------------------------------------------------------------------
@@ -50,13 +48,13 @@ APP_ACRONYM = "PIVAS"
 
 # Platforms mirror those documented in Chapters 1, 3 and 4 of the thesis.
 PLATFORMS = {
-    "WhatsApp":   "whatsapp.com",
-    "Facebook":   "facebook.com",
+    "WhatsApp":    "whatsapp.com",
+    "Facebook":    "facebook.com",
     "X (Twitter)": "x.com OR twitter.com",
-    "Instagram":  "instagram.com",
-    "TikTok":     "tiktok.com",
-    "YouTube":    "youtube.com",
-    "Telegram":   "t.me OR telegram.me",
+    "Instagram":   "instagram.com",
+    "TikTok":      "tiktok.com",
+    "YouTube":     "youtube.com",
+    "Telegram":    "t.me OR telegram.me",
 }
 
 # Trusted-source lists — Nigerian first (Chapter 5 §5.4 localisation).
@@ -70,17 +68,15 @@ TRUSTED_NG = [
 TRUSTED_INTL = [
     "bbc.com", "bbc.co.uk", "reuters.com", "apnews.com",
     "cnn.com", "aljazeera.com", "theguardian.com", "nytimes.com",
-    "africanews.com", "aa.com.tr", "france24.com",
+    "africanews.com", "aa.com.tr", "france24.com", "wikipedia.org",
 ]
-TRUSTED_ALL = TRUSTED_NG + TRUSTED_INTL
 
 
 # ----------------------------------------------------------------------
-# Search helpers (keyless)
+# Helpers
 # ----------------------------------------------------------------------
 
 def is_url(text: str) -> bool:
-    """Detect if the input looks like a URL."""
     text = text.strip()
     if not text:
         return False
@@ -92,42 +88,14 @@ def is_url(text: str) -> bool:
 
 
 def build_query(user_input: str, selected_platforms: list[str]) -> str:
-    """Compose a DuckDuckGo query string.
-
-    If the input is a URL the query is the URL itself. If platforms are
-    selected, a boolean `site:` filter is appended so DDG only returns
-    results from those domains.
-    """
     text = user_input.strip()
     if not text:
         return ""
-
     if selected_platforms:
         sites = " OR ".join(f"site:{PLATFORMS[p]}" for p in selected_platforms)
-        return f'{text} ({sites})'
+        return f"{text} ({sites})"
     return text
 
-
-def ddg_search(query: str, max_results: int = 8) -> list[dict]:
-    """Run a keyless DuckDuckGo search. Returns a list of {title,href,body}."""
-    if DDGS is None:
-        st.error(
-            "The `duckduckgo-search` library is not installed. "
-            "Run `pip install duckduckgo-search`."
-        )
-        return []
-    try:
-        with DDGS() as ddgs:
-            return list(ddgs.text(query, max_results=max_results, region="ng-en"))
-    except Exception as exc:  # pragma: no cover
-        st.error(f"Search backend error: {exc}")
-        return []
-
-
-# ----------------------------------------------------------------------
-# Verdict logic — mirrors the NIVF Module 1 (Source Triangulation) +
-# Module 2 (Lateral Reading) principles from Chapter 3 §3.5.
-# ----------------------------------------------------------------------
 
 def domain_of(url: str) -> str:
     try:
@@ -136,8 +104,76 @@ def domain_of(url: str) -> str:
         return ""
 
 
+# ----------------------------------------------------------------------
+# Search backends
+# ----------------------------------------------------------------------
+
+def ddg_search(query: str, max_results: int = 10) -> list[dict]:
+    if DDGS is None:
+        return []
+    try:
+        with DDGS() as ddgs:
+            raw = list(ddgs.text(query, max_results=max_results, region="ng-en"))
+    except Exception:
+        try:  # Retry once without region — some DDG mirrors reject ng-en
+            with DDGS() as ddgs:
+                raw = list(ddgs.text(query, max_results=max_results))
+        except Exception:
+            return []
+    # Normalise result shape (`ddgs` uses `href`, some versions use `link`).
+    normalised = []
+    for r in raw:
+        normalised.append({
+            "title": r.get("title") or r.get("name") or "(no title)",
+            "href":  r.get("href")  or r.get("url")  or r.get("link") or "",
+            "body":  r.get("body")  or r.get("snippet") or r.get("description") or "",
+        })
+    return [r for r in normalised if r["href"]]
+
+
+def wikipedia_search(query: str, max_results: int = 8) -> list[dict]:
+    """Keyless Wikipedia OpenSearch API fallback — always reachable."""
+    try:
+        r = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query", "list": "search", "srsearch": query,
+                "format": "json", "srlimit": max_results, "utf8": 1,
+            }, timeout=8,
+        )
+        if not r.ok:
+            return []
+        results = []
+        for hit in r.json().get("query", {}).get("search", []):
+            title = hit["title"]
+            slug = title.replace(" ", "_")
+            snippet = re.sub("<.*?>", "", hit.get("snippet", "")).strip()
+            results.append({
+                "title": title,
+                "href":  f"https://en.wikipedia.org/wiki/{slug}",
+                "body":  snippet + "…" if snippet else "",
+            })
+        return results
+    except Exception:
+        return []
+
+
+def run_search(query: str, max_results: int = 10) -> tuple[list[dict], str]:
+    """Try DDG first, then fall back to Wikipedia. Return (results, backend)."""
+    results = ddg_search(query, max_results=max_results)
+    if results:
+        return results, "DuckDuckGo (ddgs)"
+    fallback = wikipedia_search(query, max_results=max_results)
+    if fallback:
+        return fallback, "Wikipedia (fallback)"
+    return [], "none"
+
+
+# ----------------------------------------------------------------------
+# Verdict logic
+# ----------------------------------------------------------------------
+
 def score_results(results: list[dict]) -> dict:
-    """Count trusted-source coverage and return a verdict payload."""
     ng_hits, intl_hits, other_hits = [], [], []
     for r in results:
         dom = domain_of(r.get("href", ""))
@@ -151,35 +187,25 @@ def score_results(results: list[dict]) -> dict:
     total_trusted = len(ng_hits) + len(intl_hits)
 
     if total_trusted >= 2 and ng_hits:
-        verdict = "LIKELY AUTHENTIC"
-        colour = "#2E7D32"
-        icon = "✅"
+        verdict, colour, icon = "LIKELY AUTHENTIC", "#2E7D32", "✅"
         note = ("Multiple credible Nigerian and/or international sources are "
                 "reporting on this. Cross-check the specific claim before sharing.")
     elif total_trusted >= 2:
-        verdict = "PROBABLY AUTHENTIC — verify locally"
-        colour = "#558B2F"
-        icon = "🟢"
+        verdict, colour, icon = "PROBABLY AUTHENTIC — verify locally", "#558B2F", "🟢"
         note = ("International coverage exists but no Nigerian outlet has picked "
                 "it up yet. Search Dubawa or Africa Check for a local check.")
     elif total_trusted == 1:
-        verdict = "INCONCLUSIVE — verify further"
-        colour = "#EF6C00"
-        icon = "⚠️"
+        verdict, colour, icon = "INCONCLUSIVE — verify further", "#EF6C00", "⚠️"
         note = ("Only one credible source found. Do not share until you have "
                 "confirmed the claim with a second independent source.")
     else:
-        verdict = "SUSPECT — likely misleading or fabricated"
-        colour = "#C62828"
-        icon = "🚫"
+        verdict, colour, icon = "SUSPECT — likely misleading or fabricated", "#C62828", "🚫"
         note = ("No trusted Nigerian or international coverage found. Treat this "
                 "as suspect and check a Nigerian fact-checking organisation "
                 "(Dubawa, Africa Check, CDD, CJID) before you share.")
 
-    return {
-        "verdict": verdict, "colour": colour, "icon": icon, "note": note,
-        "ng_hits": ng_hits, "intl_hits": intl_hits, "other_hits": other_hits,
-    }
+    return {"verdict": verdict, "colour": colour, "icon": icon, "note": note,
+            "ng_hits": ng_hits, "intl_hits": intl_hits, "other_hits": other_hits}
 
 
 # ----------------------------------------------------------------------
@@ -193,54 +219,145 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- Custom CSS for a cleaner look ---
+# --- Global styling ---------------------------------------------------
+# Cyan page background for readable contrast; larger hero title;
+# single continuous card so no white separator appears between the
+# header and the search area.
 st.markdown("""
 <style>
-  .block-container { padding-top: 2rem; padding-bottom: 2rem; max-width: 1000px; }
+  html, body, [data-testid="stAppViewContainer"] {
+    background: rgba(0, 0, 0, 0.88) !important;   /* black with light opacity */
+    color: #F5F5F5;
+  }
+  [data-testid="stHeader"] { background: transparent; }
+  /* Make Streamlit's own text elements readable on the dark surface */
+  .stMarkdown, .stCaption, label, .stCheckbox label,
+  [data-testid="stMetricLabel"], [data-testid="stMetricValue"] {
+    color: #F5F5F5 !important;
+  }
+  /* Input field on the dark background */
+  .stTextInput > div > div > input {
+    background: rgba(255, 255, 255, 0.08);
+    color: #FFFFFF;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+  }
+  .stTextInput > div > div > input::placeholder { color: rgba(255, 255, 255, 0.55); }
+  /* Streamlit warning / info / error banners keep their intended colours */
+  .block-container {
+    padding-top: 1.2rem !important;
+    padding-bottom: 2rem;
+    max-width: 1000px;
+  }
+  /* Combined hero + input surface — no gap between them */
+  .pivas-shell {
+    border-radius: 20px;
+    box-shadow: 0 10px 32px rgba(0, 60, 90, 0.14);
+    overflow: hidden;
+    margin-bottom: 1.4rem;
+  }
   .pivas-hero {
-    background: linear-gradient(135deg, #0B3D91 0%, #1F6FEB 60%, #2E9E60 100%);
-    color: white; padding: 2rem 2.4rem; border-radius: 18px; margin-bottom: 1.5rem;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+    background: linear-gradient(135deg, #0B3D91 0%, #1F6FEB 55%, #00B58A 100%);
+    color: white;
+    padding: 2.4rem 2.4rem 2rem 2.4rem;
+    text-align: center;
   }
-  .pivas-hero h1 { color: white; font-size: 2rem; font-weight: 700; margin: 0 0 .35rem 0; }
-  .pivas-hero p  { color: rgba(255,255,255,0.92); margin: 0; font-size: 1.05rem; }
   .pivas-hero .badge {
-    display: inline-block; padding: 3px 10px; border-radius: 999px;
-    background: rgba(255,255,255,0.18); font-size: .78rem; margin-bottom: .6rem;
+    display: inline-block;
+    padding: 4px 14px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.22);
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    margin-bottom: 0.6rem;
   }
-  .pivas-card {
-    background: white; border: 1px solid #e6e8ec; border-radius: 14px;
-    padding: 1.25rem 1.5rem; margin-bottom: 1rem;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+  .pivas-hero h1 {
+    color: white;
+    font-size: 3.1rem;     /* enlarged logo/title */
+    font-weight: 800;
+    margin: 0.15rem 0 0.35rem 0;
+    line-height: 1.1;
+    letter-spacing: -0.5px;
+  }
+  .pivas-hero .shield {
+    font-size: 3.2rem;     /* larger shield icon */
+    display: block;
+    line-height: 1;
+    margin-bottom: 0.35rem;
+  }
+  .pivas-hero p {
+    color: rgba(255,255,255,0.95);
+    margin: 0;
+    font-size: 1.15rem;
+    font-style: italic;
+  }
+  /* The input section shares the same shell as the hero — no separator */
+  .pivas-input {
+    background: #FFFFFF;
+    padding: 1.4rem 1.8rem 0.4rem 1.8rem;
+  }
+  /* Slim divider between hero and input, if any spacing shows in Streamlit */
+  .pivas-input-top {
+    height: 4px;
+    background: linear-gradient(90deg, #0B3D91, #00B58A);
+  }
+  .pivas-plat-label {
+    font-weight: 600;
+    color: #7CC9FF;             /* light blue reads well on dark */
+    margin: 0.9rem 0 0.35rem 0;
   }
   .pivas-verdict {
-    padding: 1.1rem 1.4rem; border-radius: 14px; color: white;
-    font-size: 1.15rem; font-weight: 600; margin: 1rem 0;
+    padding: 1.15rem 1.4rem;
+    border-radius: 14px;
+    color: white;
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin: 1rem 0;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.10);
   }
-  .pivas-verdict small { display:block; font-weight:400; margin-top:.3rem; opacity:.95; }
-  .pivas-plat-label { font-weight:600; color:#0B3D91; margin: 0 0 .35rem 0; }
-  a { text-decoration: none; }
+  .pivas-verdict small {
+    display: block; font-weight: 400; margin-top: 0.35rem;
+    opacity: 0.96; font-size: 0.95rem;
+  }
   .stButton>button {
-    background: #0B3D91; color: white; border: none; border-radius: 10px;
-    padding: .55rem 1.4rem; font-weight: 600;
+    background: #0B3D91;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 0.55rem 1.5rem;
+    font-weight: 600;
   }
-  .stButton>button:hover { background: #1F6FEB; color:white; }
-  .pivas-footer { color:#6b7280; font-size:.85rem; margin-top:2rem; text-align:center; }
+  .stButton>button:hover { background: #1F6FEB; color: white; }
+  a { text-decoration: none; }
+  .pivas-card-out {
+    background: rgba(255,255,255,0.06);       /* subtle glassy card on dark */
+    border-radius: 14px;
+    padding: 1.1rem 1.4rem;
+    margin-bottom: 1rem;
+    border: 1px solid rgba(255,255,255,0.10);
+  }
+  .pivas-footer {
+    color: rgba(255,255,255,0.75);
+    font-size: 0.85rem;
+    margin-top: 2rem;
+    text-align: center;
+  }
 </style>
 """, unsafe_allow_html=True)
 
-# --- Hero ---
+# --- Combined hero + input, no separator gap --------------------------
 st.markdown(f"""
-<div class="pivas-hero">
-  <span class="badge">🛡️ {APP_ACRONYM}</span>
-  <h1>{APP_TITLE}</h1>
-  <p><em>{APP_TAGLINE}</em></p>
+<div class="pivas-shell">
+  <div class="pivas-hero">
+    <span class="shield">🛡️</span>
+    <span class="badge">{APP_ACRONYM}</span>
+    <h1>{APP_TITLE}</h1>
+    <p>{APP_TAGLINE}</p>
+  </div>
+  <div class="pivas-input-top"></div>
 </div>
 """, unsafe_allow_html=True)
 
-# --- Input card ---
-st.markdown('<div class="pivas-card">', unsafe_allow_html=True)
-
+# --- Input controls (native Streamlit widgets, no wrapping div) -------
 query_input = st.text_input(
     "Paste a link or type a headline / claim to verify",
     placeholder="e.g. https://example.com/story  —  or —  'President cancels 2027 elections'",
@@ -250,7 +367,6 @@ query_input = st.text_input(
 st.markdown('<p class="pivas-plat-label">Restrict search to social media platforms (optional):</p>',
             unsafe_allow_html=True)
 
-# 4 columns × 2 rows of platform checkboxes
 plat_cols = st.columns(4)
 selected: list[str] = []
 platforms_list = list(PLATFORMS.keys())
@@ -265,10 +381,8 @@ st.caption(
 )
 
 verify_clicked = st.button("🔍  Verify")
-st.markdown('</div>', unsafe_allow_html=True)
 
-
-# --- Search + verdict ---
+# --- Search + verdict -------------------------------------------------
 if verify_clicked:
     if not query_input.strip():
         st.warning("Please paste a link or type a claim to verify.")
@@ -278,13 +392,17 @@ if verify_clicked:
 
         with st.spinner("Consulting trusted Nigerian and international sources..."):
             query = build_query(query_input, selected)
-            results = ddg_search(query, max_results=10)
+            results, backend = run_search(query, max_results=10)
+
+        st.caption(f"Search backend used: **{backend}**")
 
         if not results:
             st.error(
-                "No results returned. If you selected a specific platform, "
-                "try without it or with a shorter query. WhatsApp content is "
-                "end-to-end encrypted and cannot be indexed by public search."
+                "No results were returned by any keyless backend. This is often "
+                "temporary (DuckDuckGo rate-limits from time to time). Try again "
+                "in a few seconds, use a shorter query, or untick any selected "
+                "social-media filter. WhatsApp content is end-to-end encrypted "
+                "and cannot be indexed by public search."
             )
         else:
             scored = score_results(results)
@@ -297,13 +415,11 @@ if verify_clicked:
                 unsafe_allow_html=True,
             )
 
-            # Coverage summary
             colA, colB, colC = st.columns(3)
-            colA.metric("Nigerian trusted sources", len(scored["ng_hits"]))
-            colB.metric("International trusted sources", len(scored["intl_hits"]))
+            colA.metric("🇳🇬 Nigerian trusted", len(scored["ng_hits"]))
+            colB.metric("🌍 International trusted", len(scored["intl_hits"]))
             colC.metric("Other results", len(scored["other_hits"]))
 
-            # Detailed results
             def render_hits(title: str, hits: list[dict]):
                 if not hits:
                     return
@@ -322,7 +438,7 @@ if verify_clicked:
             with st.expander("Other search results"):
                 render_hits("Other results", scored["other_hits"])
 
-# --- Footer ---
+# --- Footer -----------------------------------------------------------
 st.markdown(
     f'<div class="pivas-footer">'
     f'{APP_ACRONYM} · Built for the MIT 799 project at Lagos State University · '
