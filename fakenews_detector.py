@@ -19,11 +19,34 @@ Search backends (both keyless, no API secret required):
 
 from __future__ import annotations
 
+import base64
+import os
 import re
 from urllib.parse import urlparse
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
+
+
+# Path to an optional bespoke logo image. Drop a file named `logo.jpeg`,
+# `logo.png`, or `logo.svg` next to this script and it will be embedded in
+# the hero. If no such file exists, PIVAS falls back to the 🛡️ emoji.
+LOGO_CANDIDATES = ["logo.jpeg", "logo.jpg", "logo.png", "logo.svg"]
+
+
+def _find_logo() -> tuple[str, str] | None:
+    """Return (base64-data, mime-type) for the first logo file that exists."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in LOGO_CANDIDATES:
+        p = os.path.join(here, name)
+        if os.path.exists(p):
+            ext = os.path.splitext(name)[1].lower()
+            mime = {".jpeg": "image/jpeg", ".jpg": "image/jpeg",
+                    ".png": "image/png",  ".svg": "image/svg+xml"}.get(ext, "image/jpeg")
+            with open(p, "rb") as f:
+                return base64.b64encode(f.read()).decode("ascii"), mime
+    return None
 
 # `ddgs` is the current package name; the previous `duckduckgo-search`
 # releases now emit runtime errors on some networks. Import both and prefer
@@ -88,13 +111,47 @@ def is_url(text: str) -> bool:
 
 
 def build_query(user_input: str, selected_platforms: list[str]) -> str:
-    text = user_input.strip()
-    if not text:
-        return ""
-    if selected_platforms:
-        sites = " OR ".join(f"site:{PLATFORMS[p]}" for p in selected_platforms)
-        return f"{text} ({sites})"
-    return text
+    """Compose the search query.
+
+    Note: the `selected_platforms` value is NOT applied as a `site:` filter
+    on the query itself. Restricting the search to `site:facebook.com` or
+    similar would return only social-media posts, which are not fact-checks
+    and would hurt verification. The selected platforms are treated as a
+    context signal (see PLATFORM_HINTS below) and used only to tailor the
+    verdict note that follows the search.
+    """
+    return user_input.strip()
+
+
+# Guidance shown alongside the verdict, based on where the user saw the
+# content. The messages are deliberately concrete and Nigeria-aware.
+PLATFORM_HINTS = {
+    "WhatsApp": ("WhatsApp is end-to-end encrypted, so third-party fact-checkers "
+                 "cannot see private messages. If it came from a group, screenshot "
+                 "and forward the claim to Dubawa's WhatsApp tip line (+234 803 900 1069)."),
+    "Facebook": ("Facebook posts spread quickly. If the account looks new or has few "
+                 "followers, treat it as unverified until a trusted outlet confirms it."),
+    "X (Twitter)": ("X (Twitter) content often lacks context. Check whether the account "
+                    "is verified and whether the same claim appears from at least one credible "
+                    "Nigerian outlet in the results below."),
+    "Instagram": ("Instagram posts can be image- or Reels-based. Perform a reverse-image "
+                  "search on any photo (Google Images or TinEye) before you accept the claim."),
+    "TikTok": ("TikTok political clips are often edited or dubbed. Confirm with a Nigerian "
+               "fact-checker before you share."),
+    "YouTube": ("Check the channel — official Nigerian outlets (Channels TV, Arise, TVC, BBC) "
+                "have long-standing accounts; new channels claiming breaking political news are a warning sign."),
+    "Telegram": ("Telegram channels are less moderated than Facebook or X. Cross-reference "
+                 "any claim from a Telegram channel against at least two independent sources."),
+}
+
+
+TIME_WINDOWS = {
+    "Any time":         None,
+    "Past 24 hours":    "d",
+    "Past week":        "w",
+    "Past month":       "m",
+    "Past year":        "y",
+}
 
 
 def domain_of(url: str) -> str:
@@ -108,19 +165,30 @@ def domain_of(url: str) -> str:
 # Search backends
 # ----------------------------------------------------------------------
 
-def ddg_search(query: str, max_results: int = 10) -> list[dict]:
+def ddg_search(query: str, max_results: int = 10,
+               timelimit: str | None = None) -> list[dict]:
+    """Run a keyless DuckDuckGo search.
+
+    `timelimit` accepts one of: "d" (day), "w" (week), "m" (month), "y" (year)
+    or None (any time). DDG does NOT sort by date; it returns results ranked
+    by its relevance model. Setting a timelimit narrows the window so the
+    freshest coverage floats to the top of a relevance-ranked list.
+    """
     if DDGS is None:
         return []
+    kwargs = {"max_results": max_results, "region": "ng-en"}
+    if timelimit:
+        kwargs["timelimit"] = timelimit
     try:
         with DDGS() as ddgs:
-            raw = list(ddgs.text(query, max_results=max_results, region="ng-en"))
+            raw = list(ddgs.text(query, **kwargs))
     except Exception:
         try:  # Retry once without region — some DDG mirrors reject ng-en
+            kwargs.pop("region", None)
             with DDGS() as ddgs:
-                raw = list(ddgs.text(query, max_results=max_results))
+                raw = list(ddgs.text(query, **kwargs))
         except Exception:
             return []
-    # Normalise result shape (`ddgs` uses `href`, some versions use `link`).
     normalised = []
     for r in raw:
         normalised.append({
@@ -158,11 +226,13 @@ def wikipedia_search(query: str, max_results: int = 8) -> list[dict]:
         return []
 
 
-def run_search(query: str, max_results: int = 10) -> tuple[list[dict], str]:
+def run_search(query: str, max_results: int = 10,
+               timelimit: str | None = None) -> tuple[list[dict], str]:
     """Try DDG first, then fall back to Wikipedia. Return (results, backend)."""
-    results = ddg_search(query, max_results=max_results)
+    results = ddg_search(query, max_results=max_results, timelimit=timelimit)
     if results:
         return results, "DuckDuckGo (ddgs)"
+    # Wikipedia has no equivalent time filter; ignore the timelimit for it.
     fallback = wikipedia_search(query, max_results=max_results)
     if fallback:
         return fallback, "Wikipedia (fallback)"
@@ -258,36 +328,50 @@ st.markdown("""
   .pivas-hero {
     background: linear-gradient(135deg, #0B3D91 0%, #1F6FEB 55%, #00B58A 100%);
     color: white;
-    padding: 2.4rem 2.4rem 2rem 2.4rem;
-    text-align: center;
+    padding: 0.95rem 1.4rem 0.85rem 1.4rem;   /* compact header */
+    text-align: left;
+  }
+  .pivas-hero .pivas-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .pivas-hero .logo-img {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    object-fit: cover;
+    background: rgba(255,255,255,0.10);
+    flex-shrink: 0;
+  }
+  .pivas-hero .shield {
+    font-size: 2.0rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .pivas-hero h1 {
+    color: white;
+    font-size: 1.55rem;    /* inline with logo — moderate size */
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.15;
+    letter-spacing: -0.3px;
+    flex: 1;
   }
   .pivas-hero .badge {
     display: inline-block;
     padding: 4px 14px;
     border-radius: 999px;
     background: rgba(255,255,255,0.22);
-    font-size: 0.85rem;
-    letter-spacing: 0.15em;
-    margin-bottom: 0.6rem;
-  }
-  .pivas-hero h1 {
-    color: white;
-    font-size: 3.1rem;     /* enlarged logo/title */
-    font-weight: 800;
-    margin: 0.15rem 0 0.35rem 0;
-    line-height: 1.1;
-    letter-spacing: -0.5px;
-  }
-  .pivas-hero .shield {
-    font-size: 3.2rem;     /* larger shield icon */
-    display: block;
-    line-height: 1;
-    margin-bottom: 0.35rem;
+    font-size: 1.05rem;          /* enlarged acronym */
+    letter-spacing: 0.18em;
+    font-weight: 700;
   }
   .pivas-hero p {
     color: rgba(255,255,255,0.95);
-    margin: 0;
-    font-size: 1.15rem;
+    margin: 0.35rem 0 0 0;
+    font-size: 0.9rem;
     font-style: italic;
   }
   /* The input section shares the same shell as the hero — no separator */
@@ -318,15 +402,27 @@ st.markdown("""
     display: block; font-weight: 400; margin-top: 0.35rem;
     opacity: 0.96; font-size: 0.95rem;
   }
-  .stButton>button {
-    background: #0B3D91;
-    color: white;
-    border: none;
-    border-radius: 10px;
-    padding: 0.55rem 1.5rem;
-    font-weight: 600;
+  /* Primary action buttons — regular and form submit both hit these */
+  .stButton>button,
+  [data-testid="stFormSubmitButton"] button {
+    background: #16A34A !important;   /* action green */
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 10px !important;
+    padding: 0.6rem 1.6rem !important;
+    font-weight: 700 !important;
+    box-shadow: 0 3px 10px rgba(22, 163, 74, 0.30);
+    transition: background 0.15s ease, transform 0.05s ease;
   }
-  .stButton>button:hover { background: #1F6FEB; color: white; }
+  .stButton>button:hover,
+  [data-testid="stFormSubmitButton"] button:hover {
+    background: #15803D !important;   /* deeper green on hover */
+    color: #FFFFFF !important;
+  }
+  .stButton>button:active,
+  [data-testid="stFormSubmitButton"] button:active {
+    transform: translateY(1px);
+  }
   a { text-decoration: none; }
   .pivas-card-out {
     background: rgba(255,255,255,0.06);       /* subtle glassy card on dark */
@@ -345,12 +441,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Combined hero + input, no separator gap --------------------------
+# Resolve the logo — prefer a bespoke image dropped into fake-news-detector/,
+# otherwise fall back to the 🛡️ emoji.
+_logo = _find_logo()
+if _logo:
+    _b64, _mime = _logo
+    logo_html = f'<img class="logo-img" src="data:{_mime};base64,{_b64}" alt="PIVAS logo" />'
+else:
+    logo_html = '<span class="shield">🛡️</span>'
+
 st.markdown(f"""
 <div class="pivas-shell">
   <div class="pivas-hero">
-    <span class="shield">🛡️</span>
-    <span class="badge">{APP_ACRONYM}</span>
-    <h1>{APP_TITLE}</h1>
+    <div class="pivas-brand">
+      {logo_html}
+      <h1>{APP_TITLE}</h1>
+      <span class="badge">{APP_ACRONYM}</span>
+    </div>
     <p>{APP_TAGLINE}</p>
   </div>
   <div class="pivas-input-top"></div>
@@ -358,29 +465,78 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # --- Input controls (native Streamlit widgets, no wrapping div) -------
-query_input = st.text_input(
-    "Paste a link or type a headline / claim to verify",
-    placeholder="e.g. https://example.com/story  —  or —  'President cancels 2027 elections'",
-    key="pivas_query",
+# Wrap input + platform ticks + time window + Verify button in a form so
+# pressing Enter inside the search input triggers a submission (Streamlit
+# forms auto-submit on Enter). Without the form, Enter would only update
+# the input value and the user would have to click Verify separately.
+with st.form(key="pivas_form", clear_on_submit=False):
+    query_input = st.text_input(
+        "Paste a link or type a headline / claim to verify",
+        placeholder="e.g. https://example.com/story  —  or —  'President cancels 2027 elections'",
+        key="pivas_query",
+    )
+
+    st.markdown('<p class="pivas-plat-label">Where did you originally see this content? (optional)</p>',
+                unsafe_allow_html=True)
+
+    plat_cols = st.columns(4)
+    selected: list[str] = []
+    platforms_list = list(PLATFORMS.keys())
+    for idx, name in enumerate(platforms_list):
+        with plat_cols[idx % 4]:
+            if st.checkbox(name, key=f"plat_{name}"):
+                selected.append(name)
+
+    st.caption(
+        "Selecting a platform does not limit the search. "
+        "PIVAS always checks trusted Nigerian and global sources. "
+        "It simply adds platform-specific guidance "
+        "e.g., WhatsApp forwards require different verification methods)."
+    )
+
+    st.markdown('<p class="pivas-plat-label">How recent should the coverage be?</p>',
+                unsafe_allow_html=True)
+    time_label = st.radio(
+        label="How recent should the coverage be?",
+        options=list(TIME_WINDOWS.keys()),
+        index=3,   # default to "Past month" — best for political content
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption(
+        "The framework returns results ranked by relevance, not by date. "
+        "To find fresh results, narrow the time range: "
+        "use Past month for political topics and Past 24 hours for breaking news."
+    )
+
+    # The submit button IS the Verify button. Pressing Enter in any text
+    # input inside a Streamlit form triggers this submit automatically.
+    verify_clicked = st.form_submit_button("🔍  Verify (or press Enter)")
+
+# Disable browser autocorrect / autocapitalise / autocomplete / spellcheck
+# on the search input. Streamlit does not expose these attributes on
+# st.text_input, so we set them via a small JS component that also
+# re-applies them on every Streamlit re-render via a MutationObserver.
+components.html(
+    """
+    <script>
+      const disableAutocorrect = () => {
+        const doc = window.parent.document;
+        doc.querySelectorAll('input[type="text"], textarea').forEach(el => {
+          el.setAttribute('autocorrect', 'off');
+          el.setAttribute('autocapitalize', 'off');
+          el.setAttribute('autocomplete', 'off');
+          el.setAttribute('spellcheck', 'false');
+        });
+      };
+      disableAutocorrect();
+      // Keep applying — Streamlit re-renders inputs on every interaction.
+      const observer = new MutationObserver(disableAutocorrect);
+      observer.observe(window.parent.document.body, { childList: true, subtree: true });
+    </script>
+    """,
+    height=0,
 )
-
-st.markdown('<p class="pivas-plat-label">Restrict search to social media platforms (optional):</p>',
-            unsafe_allow_html=True)
-
-plat_cols = st.columns(4)
-selected: list[str] = []
-platforms_list = list(PLATFORMS.keys())
-for idx, name in enumerate(platforms_list):
-    with plat_cols[idx % 4]:
-        if st.checkbox(name, key=f"plat_{name}"):
-            selected.append(name)
-
-st.caption(
-    "Leave every box unticked to run an open web search across trusted Nigerian and "
-    "international fact-checking / news sources."
-)
-
-verify_clicked = st.button("🔍  Verify")
 
 # --- Search + verdict -------------------------------------------------
 if verify_clicked:
@@ -392,9 +548,14 @@ if verify_clicked:
 
         with st.spinner("Consulting trusted Nigerian and international sources..."):
             query = build_query(query_input, selected)
-            results, backend = run_search(query, max_results=10)
+            timelimit = TIME_WINDOWS.get(time_label)
+            results, backend = run_search(query, max_results=10, timelimit=timelimit)
 
-        st.caption(f"Search backend used: **{backend}**")
+        st.caption(
+            f"Search backend: **{backend}** · Time window: **{time_label}** · "
+            f"Results are ranked by relevance (no public search engine sorts by date; "
+            f"the time window is the reliable way to prioritise recent coverage)."
+        )
 
         if not results:
             st.error(
@@ -414,6 +575,14 @@ if verify_clicked:
                 f'<small>{scored["note"]}</small></div>',
                 unsafe_allow_html=True,
             )
+
+            # Platform-specific tailored guidance (uses the checkboxes)
+            if selected:
+                st.markdown("#### 📍 Platform-specific guidance")
+                for p in selected:
+                    hint = PLATFORM_HINTS.get(p)
+                    if hint:
+                        st.markdown(f"**{p}** — {hint}")
 
             colA, colB, colC = st.columns(3)
             colA.metric("🇳🇬 Nigerian trusted", len(scored["ng_hits"]))
@@ -441,7 +610,7 @@ if verify_clicked:
 # --- Footer -----------------------------------------------------------
 st.markdown(
     f'<div class="pivas-footer">'
-    f'{APP_ACRONYM} · Built for the MIT 799 project at Lagos State University · '
+    f'{APP_ACRONYM} · Built for the MIT 799 Project at Lagos State University, 2023/24  · '
     f'Verify first, share responsibly.'
     f'</div>',
     unsafe_allow_html=True,
