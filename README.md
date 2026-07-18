@@ -1,69 +1,95 @@
-# Fake news detector
-This project is a simple yet effective Fake News Detection Tool built using Python and Streamlit. It helps users verify whether a given news headline or claim appears on trusted news sources using the Google Custom Search API.
+# PIVAS — Political Information Verification Assisted System
 
-### Features
-1. Accepts any news headline or statement as input
-2. Searches the web through the Google Custom Search Engine (CSE)
-3. Checks whether the claim appears on trusted and verified media websites
-4. Displays top relevant search results with snippets and source links
+> *Verify first, share responsibly.*
 
-### Provides a verdict:
+**PIVAS** is the tangible artifact of an MIT 799 postgraduate project at Lagos State University titled *"Deepfakes and the Spread of Political Misinformation: Developing a Framework for Information Verification among Nigerian Social Media Users."*
 
- Likely True (found on multiple trusted sites)
+It operationalises the **Nigerian Information Verification Framework (NIVF)** proposed in Chapter 3 and Chapter 4 of the thesis. Any Nigerian social-media user can paste a suspicious political claim, headline, or link into PIVAS and instantly receive a lightweight, colour-coded verdict grounded in coverage by Nigerian fact-checkers and credible mainstream media.
 
-Possibly True (found on one trusted site)
+---
 
-Possibly Fake (no trusted matches found)
+## Features
 
-### How It Works
+- **Text or URL input** — paste a headline, a claim, or a full link.
+- **Optional platform filter** — restrict the search to WhatsApp, Facebook, X (formerly Twitter), Instagram, TikTok, YouTube, or Telegram. Leave every box unticked for an open web search.
+- **Keyless search backend** — powered by DuckDuckGo (`duckduckgo-search`), so PIVAS runs on Streamlit Community Cloud without any API secret.
+- **Nigeria-first trusted-source list** — Dubawa, Africa Check, CDD West Africa, CJID, Premium Times, The Punch, Vanguard, Guardian NG, Channels TV, Arise TV, Sahara Reporters, Daily Trust, TheCable, plus international corroborators (BBC, Reuters, AP, CNN, Al Jazeera, Guardian, AfricaNews).
+- **Explainable verdicts** — every verdict comes with a plain-English note telling the user what to do next, in the spirit of NIVF Module 4 (Contextual Reasoning) and Module 5 (Platform Action).
+- **Aesthetic UI** — custom Streamlit styling with a Nigerian-flag-inspired hero gradient, card layout, and metric summaries.
 
-User inputs a headline or claim.
+## Verdict scheme
 
-The app calls the Google Custom Search API with the query.
+| Icon | Verdict | Meaning |
+|---|---|---|
+| ✅ | LIKELY AUTHENTIC | Multiple trusted sources (including at least one Nigerian) are reporting on this. |
+| 🟢 | PROBABLY AUTHENTIC — verify locally | ≥2 international trusted sources but no Nigerian coverage yet. Check Dubawa or Africa Check. |
+| ⚠️ | INCONCLUSIVE — verify further | Only one credible source found. Do not share until you have a second independent confirmation. |
+| 🚫 | SUSPECT — likely misleading or fabricated | No trusted coverage. Check a Nigerian fact-checker before you share. |
 
-The returned search results are scanned against a predefined list of trusted domains (e.g., BBC, Reuters, The Hindu, NDTV, etc.).
+## How it works
 
-Based on the number of trusted matches, the app provides a simple, interpretable verdict.
+1. The user pastes a claim or a URL.
+2. PIVAS composes a DuckDuckGo query, optionally restricted with `site:` filters to the chosen platforms.
+3. DuckDuckGo returns up to ten results in the `ng-en` region.
+4. Each result is classified by domain against a Nigerian trusted list and an international trusted list.
+5. A verdict, an explanatory note, and category-level metrics (Nigerian hits / international hits / other) are rendered, followed by the annotated result cards.
 
-Results are displayed with article titles, links, and summaries.
+## Technology stack
 
-### The Tech Stack
+| Layer | Technology | Purpose |
+|---|---|---|
+| Language | Python 3.10+ | Application language |
+| UI | Streamlit ≥ 1.32 | Web front end + hosting |
+| HTTP client | Requests ≥ 2.31 | Reserved for future direct-fetch of platform APIs |
+| Search backend | duckduckgo-search ≥ 6.1 | Keyless open web search |
+| Hosting | Streamlit Community Cloud | Free public hosting |
+| Version control | Git / GitHub | Source control on branch `feature/pivas` |
 
-Python 3.x
-Streamlit (for the web interface)
-Requests (for interacting with Google’s API)
+## Setup
 
-### Setup Instructions
-1. Clone the Repository
+```bash
 git clone https://github.com/<your-username>/fake-news-detector.git
 cd fake-news-detector
-
-2. Install Dependencies
+git checkout feature/pivas
 pip install -r requirements.txt
+streamlit run fakenews_detector.py
+```
 
-3. Configure API Credentials
+No API keys are required. The application will launch on `http://localhost:8501`.
 
-Create a Google Custom Search Engine (CSE) and enable the Custom Search JSON API.
-Then, open the Python script and replace:
+## Deployment on Streamlit Community Cloud
 
-API_KEY = your own api
-CSE_ID = your own cx key
+1. Push the branch to GitHub.
+2. On [share.streamlit.io](https://share.streamlit.io), connect the repo and select `fakenews_detector.py` as the main file.
+3. Streamlit auto-installs from `requirements.txt`. No secrets required.
 
-4. Run the Application
-streamlit run app.py
+## Project structure
 
-Project Structure
-├── app.py               Main Streamlit app script
-├── requirements.txt     the Dependencies
-└── README.md            the Project documentation
+```
+fake-news-detector/
+├── fakenews_detector.py    # PIVAS Streamlit application
+├── requirements.txt        # Python dependencies
+├── README.md               # This file
+└── LICENSE
+```
 
-#### Some Illustrations:
-<img width="1550" height="637" alt="image" src="https://github.com/user-attachments/assets/f9970388-24b6-408d-ac12-42fcbfa9b066" />
+## Notes on platform coverage
 
-<img width="1590" height="774" alt="image" src="https://github.com/user-attachments/assets/3456e35f-f4f6-415e-9d77-29fa420ed40c" />
+- **WhatsApp** is end-to-end encrypted; public search cannot index private chats. Ticking the WhatsApp box will only reach public-facing whatsapp.com pages (business profiles, channels).
+- **Telegram** and **YouTube** are the most search-indexable of the seven platforms; results from those tend to be richest.
+- **X / Twitter** results depend on the current openness of the platform's search index and may be sparse for very recent tweets.
 
+## Related project artefacts
 
-##### Author
+- Thesis chapters: `_Chapter 1.docx` through `_Chapter 5.docx`, and `_Reference.docx`.
+- Survey: `create_google_form.gs` and `SURVEY_QUESTIONS.md`.
+- Reference-list maintenance: `REFERENCES_MAINTENANCE.md`.
 
-Saptarshi Bandyopadhyay(@saptarshi-ux)
-Data & Analytics Professional | Economics & Technology Enthusiast
+## Author and acknowledgements
+
+**Ayokunle Fatokimi**, MIT 799 candidate, Lagos State University.
+The base of this application was forked from a fake-news detector by Saptarshi Bandyopadhyay (@saptarshi-ux); it has been substantially rewritten to serve as the NIVF verification artifact for the Nigerian context.
+
+## Licence
+
+See `LICENSE` file.
